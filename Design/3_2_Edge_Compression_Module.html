@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>생산법인(Edge) 데이터 압축 및 OEE 추정 모듈 설계서</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 950px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f7f6;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #16a085;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #16a085;
+            margin-top: 30px;
+            border-left: 4px solid #16a085;
+            padding-left: 10px;
+        }
+        h3 {
+            color: #34495e;
+        }
+        p {
+            margin-bottom: 15px;
+        }
+        .section-card {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 1.4;
+        }
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        /* Syntax Highlighting */
+        .keyword { color: #c678dd; }
+        .builtin { color: #e5c07b; }
+        .string { color: #98c379; }
+        .comment { color: #5c6370; font-style: italic; }
+        .function { color: #61afef; }
+        .number { color: #d19a66; }
+        
+        ul, ol {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 10px;
+        }
+        .highlight {
+            background-color: #e8f8f5;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-weight: bold;
+            color: #0e6655;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>2. 생산법인(Edge) 데이터 압축 및 OEE 추정 모듈 개발</h1>
+    
+    <div class="section-card">
+        <h2>1. 모듈 개요 (Module Overview)</h2>
+        <p>본 모듈은 Edge 환경에서 수집되는 초당 수백 건의 Cycle Time(CT) 및 Tact Time(TT) 데이터를 본사로 전부 전송하지 않고, <strong>인메모리(In-Memory) 상태에서 실시간으로 압축 및 통계 처리</strong>를 수행하는 핵심 엔진입니다.</p>
+        <ul>
+            <li><strong>메모리 최적화:</strong> 전체 데이터를 배열에 저장하지 않고, 상태값만 업데이트하는 스트리밍 알고리즘 적용.</li>
+            <li><strong>네트워크 비용 절감:</strong> KLL 스케치 알고리즘을 통해 수백만 건의 데이터를 수 KB 수준의 바이트 배열로 압축.</li>
+            <li><strong>OEE 추정:</strong> 가동률(A), 성능효율(P), 양품률(Q)을 실시간 집계하여 설비 종합 효율 산출.</li>
+        </ul>
+    </div>
+
+    <div class="section-card">
+        <h2>2. 핵심 구현 1: Welford의 온라인 알고리즘 (평균/분산 스트리밍 연산)</h2>
+        <p>메모리 부족(OOM) 방지를 위해, 과거 데이터를 저장하지 않고 새로 들어오는 데이터만으로 평균(Mean)과 분산(Variance)을 정확하게 계산하는 <span class="highlight">Welford's Online Algorithm</span>을 구현합니다.</p>
+<pre><code><span class="keyword">class</span> <span class="function">WelfordAggregator</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self):
+        <span class="comment"># 상태값만 메모리에 유지 (전체 데이터 배열 저장 안 함)</span>
+        self.count = <span class="number">0</span>
+        self.mean = <span class="number">0.0</span>
+        self.M2 = <span class="number">0.0</span> <span class="comment"># Sum of squares of differences from the current mean</span>
+
+    <span class="keyword">def</span> <span class="function">update</span>(self, value):
+        <span class="comment">"""새로운 CT/TT 데이터가 들어올 때마다 상태값 업데이트"""</span>
+        self.count += <span class="number">1</span>
+        delta = value - self.mean
+        self.mean += delta / self.count
+        delta2 = value - self.mean
+        self.M2 += delta * delta2
+
+    <span class="keyword">def</span> <span class="function">get_mean</span>(self):
+        <span class="keyword">return</span> self.mean
+
+    <span class="keyword">def</span> <span class="function">get_variance</span>(self):
+        <span class="comment">"""표본 분산(Sample Variance) 반환"""</span>
+        <span class="keyword">if</span> self.count <span class="keyword"><</span> <span class="number">2</span>:
+            <span class="keyword">return</span> <span class="number">0.0</span>
+        <span class="keyword">return</span> self.M2 / (self.count - <span class="number">1</span>)
+</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>3. 핵심 구현 2: Apache DataSketches (KLL 스케치) 적용</h2>
+        <p>데이터의 분포(Distribution)와 중앙값(P50), 99분위수(P99) 등을 추정하기 위해 <span class="highlight">KLL(Karnin, Lang, Liberty) 스케치</span>를 도입합니다. 파라미터 K=200을 설정하여 정확도(오차율 ~1.33%)와 메모리 사용량(수 KB)의 최적 균형을 맞춥니다.</p>
+        
+<pre><code><span class="comment"># pip install datasketches 라이브러리 활용</span>
+<span class="keyword">from</span> datasketches <span class="keyword">import</span> kll_floats_sketch
+
+<span class="keyword">class</span> <span class="function">KllCompressor</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, k=<span class="number">200</span>):
+        <span class="comment"># K=200 설정으로 Edge 서버의 메모리 부하 최소화</span>
+        self.sketch = kll_floats_sketch(k)
+
+    <span class="keyword">def</span> <span class="function">add_data</span>(self, value):
+        <span class="comment">"""실시간 지표 스트리밍 입력"""</span>
+        <span class="keyword">if</span> value <span class="keyword">is not None</span>:
+            self.sketch.update(value)
+
+    <span class="keyword">def</span> <span class="function">get_quantiles</span>(self):
+        <span class="comment">"""P50(중앙값), P90, P99 추출"""</span>
+        <span class="keyword">if</span> self.sketch.is_empty():
+            <span class="keyword">return None</span>
+        <span class="keyword">return</span> {
+            <span class="string">"P50"</span>: self.sketch.get_quantile(<span class="number">0.5</span>),
+            <span class="string">"P90"</span>: self.sketch.get_quantile(<span class="number">0.9</span>),
+            <span class="string">"P99"</span>: self.sketch.get_quantile(<span class="number">0.99</span>)
+        }
+
+    <span class="keyword">def</span> <span class="function">get_serialized_data</span>(self):
+        <span class="comment">"""본사 전송을 위해 직렬화 (이후 Zstd로 추가 압축 진행)"""</span>
+        <span class="keyword">return</span> self.sketch.serialize()
+</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>4. OEE (설비종합효율) 실시간 추정 로직 결합</h2>
+        <p>위에서 산출된 통계 데이터와 앞선 모듈(SQLite)의 Context 데이터를 결합하여 Edge 단에서 즉각적인 OEE 모니터링이 가능하도록 구성합니다.</p>
+        <ul>
+            <li><strong>Availability (가동률):</strong> (계획 정지 시간을 제외한 실제 가동 시간) / (부하 시간)</li>
+            <li><strong>Performance (성능효율):</strong> (이론적 CT * 총 생산량) / (실제 가동 시간) -> <i>Welford 연산의 Mean 값을 활용</i></li>
+            <li><strong>Quality (양품률):</strong> (양품 수량) / (총 생산 수량)</li>
+        </ul>
+        <p class="comment">※ Edge에서는 일정 주기(예: 30분, 1시간)마다 위의 <code>WelfordAggregator</code>와 <code>KllCompressor</code> 객체를 새로 생성하여 메모리를 비우고(Reset), 직렬화된 요약본만 본사(HQ)로 전송하는 스케줄러와 연동됩니다.</p>
+    </div>
+
+</body>
+</html>

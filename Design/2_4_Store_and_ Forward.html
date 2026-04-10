@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>데이터 동기화 및 전송 프로토콜 상세 설계</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9fa;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            border-bottom: 2px solid #2c3e50;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 40px;
+            border-bottom: 1px solid #bdc3c7;
+            padding-bottom: 5px;
+        }
+        h3 {
+            color: #34495e;
+            background-color: #ecf0f1;
+            padding: 8px 12px;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+        }
+        p, li {
+            font-size: 1.05em;
+        }
+        .box {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .highlight {
+            font-weight: bold;
+            color: #e74c3c;
+        }
+        .code-block {
+            background-color: #2b2b2b;
+            color: #a9b7c6;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', Courier, monospace;
+            overflow-x: auto;
+            margin-bottom: 20px;
+        }
+        .json-key { color: #9876aa; }
+        .json-string { color: #6a8759; }
+        .json-number { color: #6897bb; }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #34495e;
+            color: white;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        .step-container {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+            margin-bottom: 30px;
+        }
+        .step-box {
+            background-color: #fff;
+            border: 2px solid #3498db;
+            border-radius: 8px;
+            padding: 15px;
+            width: 30%;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .step-arrow {
+            display: flex;
+            align-items: center;
+            font-size: 2em;
+            color: #3498db;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>설비 생산성 관리 시스템<br>데이터 동기화 및 전송 프로토콜 (Store & Forward) 상세 설계서</h1>
+
+    <div class="box">
+        <p>본 문서는 전 세계 7개 생산 법인(Edge)에서 산출된 방대한 설비 데이터를 본사(HQ) 통합 서버로 <strong>유실 없이, 그리고 네트워크 부하를 최소화하여 전송</strong>하기 위한 'Store & Forward' 아키텍처 및 페이로드 규격을 정의합니다.</p>
+    </div>
+
+    <h2>📡 1. 동기화 아키텍처 (Store & Forward Flow)</h2>
+    <p>현장의 통신 단절에 완벽하게 대비하고 서버 트래픽을 최적화하기 위해, 실시간 스트리밍이 아닌 <strong>30분 단위 배치(Batch) 큐잉 방식</strong>을 채택합니다.</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>프로세스 단계</th>
+                <th>주요 동작 및 설명</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>1. 수집 및 통계 요약 (Store)</strong></td>
+                <td>Edge 서버에서 30분 동안 생성된 <code>TB_ENRICHED_LOG</code> 데이터를 백그라운드 프로세스가 스캔하여, KLL/Chan 알고리즘 기반의 통계치로 요약 압축합니다.</td>
+            </tr>
+            <tr>
+                <td><strong>2. 대기열 적재 (Queueing)</strong></td>
+                <td>요약된 데이터를 JSON 형태로 구성하여 SQLite의 <code>TB_SEND_QUEUE</code> 테이블에 <code>IS_SENT = 'N'</code> 상태로 인서트합니다.</td>
+            </tr>
+            <tr>
+                <td><strong>3. 스케줄러 전송 (Forward)</strong></td>
+                <td>매 30분 정각(예: 00분, 30분)에 전송 스케줄러가 큐(Queue)를 읽어 본사의 REST API 엔드포인트로 HTTP POST 전송을 시도합니다.</td>
+            </tr>
+            <tr>
+                <td><strong>4. 장애 대응 및 복구 (Retry)</strong></td>
+                <td>네트워크 단절로 전송에 실패할 경우, 데이터는 유실되지 않고 큐에 안전하게 보존됩니다.<br>통신 복구 시, <span class="highlight">SEQ_NO가 가장 오래된 미전송 패키지부터 순차적으로 일괄 재전송(Catch-up)</span>하여 본사 DB의 시계열 정합성을 보장합니다.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>📦 2. 전송 패키징 규격 (JSON Payload)</h2>
+    <p>요청된 최신 명명 규칙(<strong>HEADQUARTERCODE, SITE_CODE, GODS_CODE, PROD_ID</strong>)을 반영한 30분 단위 전송 페이로드 규격입니다. 배열(Array) 구조를 사용하여 한 번의 전송에 다수의 설비 데이터를 포함합니다.</p>
+
+    <div class="code-block">
+<pre>
+{
+  <span class="json-key">"header"</span>: {
+    <span class="json-key">"headquartercode"</span>: <span class="json-string">"HQ_01"</span>,
+    <span class="json-key">"site_code"</span>: <span class="json-string">"VN01"</span>,
+    <span class="json-key">"timestamp"</span>: <span class="json-string">"2026-04-10T12:30:00Z"</span>,
+    <span class="json-key">"payload_type"</span>: <span class="json-string">"30MIN_AGGR_STAT"</span>,
+    <span class="json-key">"version"</span>: <span class="json-string">"2.0"</span>
+  },
+  <span class="json-key">"body"</span>: {
+    <span class="json-key">"stat_summaries"</span>: [
+      {
+        <span class="json-key">"eqp_id"</span>: <span class="json-string">"EQP-A01"</span>,
+        <span class="json-key">"gods_code"</span>: <span class="json-string">"PRD-999"</span>,
+        <span class="json-key">"prod_id"</span>: <span class="json-string">"MODEL-X"</span>,
+        <span class="json-key">"recipe_id"</span>: <span class="json-string">"RECIPE_A"</span>,
+        <span class="json-key">"ct_metrics"</span>: {
+          <span class="json-key">"chan_stats"</span>: { <span class="json-key">"count"</span>: <span class="json-number">450</span>, <span class="json-key">"mean"</span>: <span class="json-number">45.2</span>, <span class="json-key">"m2"</span>: <span class="json-number">12.5</span> },
+          <span class="json-key">"kll_sketch_b64"</span>: <span class="json-string">"AABBCCDD..."</span> <span style="color: #888;">// KLL 스케치 직렬화 바이너리 데이터</span>
+        },
+        <span class="json-key">"tt_metrics"</span>: {
+          <span class="json-key">"chan_stats"</span>: { <span class="json-key">"count"</span>: <span class="json-number">450</span>, <span class="json-key">"mean"</span>: <span class="json-number">50.1</span>, <span class="json-key">"m2"</span>: <span class="json-number">18.2</span> },
+          <span class="json-key">"kll_sketch_b64"</span>: <span class="json-string">"EEFFGGHH..."</span>
+        }
+      }
+    ],
+    <span class="json-key">"oee_metrics"</span>: [
+      {
+        <span class="json-key">"eqp_id"</span>: <span class="json-string">"EQP-A01"</span>, 
+        <span class="json-key">"total_run_time"</span>: <span class="json-number">1500</span>, 
+        <span class="json-key">"total_stop_time"</span>: <span class="json-number">300</span>, 
+        <span class="json-key">"done_qty"</span>: <span class="json-number">450</span>
+      }
+    ]
+  }
+}
+</pre>
+    </div>
+
+    <h2>🗜️ 3. 3단계 데이터 압축 및 최적화 전략</h2>
+    <p>해외 법인 간의 제한적인 대역폭을 극복하기 위해 데이터 생성부터 네트워크 전송 단계까지 3중 압축 전략을 적용합니다.</p>
+
+    <div class="step-container">
+        <div class="step-box">
+            <h3 style="margin-top:0;">Step 1: 데이터 요약 (Algorithm)</h3>
+            <p style="font-size:0.9em; text-align:left;">
+                원천(Raw) CT/TT 데이터를 모두 전송하지 않고, <strong>KLL 스케치(분포도)</strong> 및 <strong>Chan 알고리즘(평균/분산)</strong>으로 30분 단위 통계 특성만 추출하여 부피를 99% 삭감합니다.
+            </p>
+        </div>
+        <div class="step-arrow">➔</div>
+        <div class="step-box">
+            <h3 style="margin-top:0;">Step 2: 직렬화 (Serialization)</h3>
+            <p style="font-size:0.9em; text-align:left;">
+                생성된 인메모리 KLL 스케치 객체를 <strong>Base64 인코딩을 통한 Byte 배열</strong>로 변환하여 텍스트 오버헤드 없이 최소한의 크기(수백 바이트)로 JSON에 삽입합니다.
+            </p>
+        </div>
+        <div class="step-arrow">➔</div>
+        <div class="step-box">
+            <h3 style="margin-top:0;">Step 3: 네트워크 압축 (Network)</h3>
+            <p style="font-size:0.9em; text-align:left;">
+                완성된 JSON 페이로드를 HTTP 전송 직전 <strong>Zstandard (Zstd)</strong> 알고리즘으로 전체 압축합니다. Zstd는 Gzip 대비 압축/해제 속도가 뛰어나 Edge 환경에 최적화되어 있습니다.
+            </p>
+        </div>
+    </div>
+
+    <h2>✅ 4. 전송 후 처리 로직 (Post-Transmission)</h2>
+    <div class="box">
+        <ul>
+            <li><strong>본사 수신 확인 (Acknowledge):</strong> 본사 Oracle 서버가 데이터를 성공적으로 적재한 후 <code>HTTP 200 OK</code> 응답을 반환해야 전송 성공으로 간주합니다.</li>
+            <li><strong>큐(Queue) 정리:</strong> 200 OK 수신 시, 해당 페이로드의 <code>TB_SEND_QUEUE</code> 내 <code>IS_SENT</code> 상태를 'Y'로 변경합니다. (보관 주기 7일 경과 후 하드 삭제 수행)</li>
+            <li><strong>인메모리 초기화:</strong> 전송 성공 확인 즉시, Edge 서버 메모리에 적재되어 있던 해당 30분 구간의 KLL Sketch 객체와 Chan 상태 변수(n, mean, m2)를 초기화(Reset)하여 메모리 누수를 원천 차단합니다.</li>
+        </ul>
+    </div>
+
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>생산법인(Edge) 실시간 처리 및 상태 관리 모듈 설계서</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #34495e;
+        }
+        .section-card {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+        }
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        .keyword { color: #c678dd; }
+        .string { color: #98c379; }
+        .comment { color: #5c6370; font-style: italic; }
+        .function { color: #61afef; }
+        ul, ol {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+        .highlight {
+            background-color: #e8f4f8;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>생산법인(Edge) 실시간 처리 및 상태 관리 모듈 개발</h1>
+    
+    <div class="section-card">
+        <h2>1. 전체 데이터 흐름 (Data Flow)</h2>
+        <ol>
+            <li><strong>Event 수신:</strong> 설비로부터 생산 시작(Start), 종료(End), 알람(Alarm) 등의 원천 로그 수신 (TCP/MQTT 등).</li>
+            <li><strong>Context 매핑:</strong> 메모리 상의 MOS 데이터(현재 Lot ID, 투입 수량 등)와 설비 이벤트를 결합.</li>
+            <li><strong>지표 산출:</strong> 시간차 연산을 통해 실시간 <span class="highlight">CT(Cycle Time)</span> 및 <span class="highlight">TT(Tact Time)</span> 계산.</li>
+            <li><strong>로컬 저장:</strong> 처리된 결과물을 SQLite에 고속 저장.</li>
+        </ol>
+    </div>
+
+    <div class="section-card">
+        <h2>2. 핵심 구현 1: 설비 메시지 파싱 및 지표(CT/TT) 산출 로직</h2>
+        <p>설비에서 들어오는 데이터를 파싱하고, 이전 작업의 타임스탬프와 비교하여 지표를 산출하는 Python 비동기 클래스 구조입니다.</p>
+<pre><code><span class="keyword">import</span> asyncio
+<span class="keyword">from</span> datetime <span class="keyword">import</span> datetime
+
+<span class="keyword">class</span> <span class="function">EquipmentMonitor</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self):
+        <span class="comment"># 설비별 마지막 작업 완료 시간을 메모리에서 관리 (고속 연산 용도)</span>
+        self.last_end_time = {} 
+
+    <span class="keyword">async def</span> <span class="function">process_message</span>(self, raw_msg):
+        <span class="comment">"""설비 수신 메시지 파싱 및 지표 산출"""</span>
+        <span class="comment"># 1. 메시지 파싱 (가정: JSON 형태)</span>
+        data = self.parse_json(raw_msg)
+        eqp_id = data[<span class="string">'equipment_id'</span>]
+        event_time = datetime.fromisoformat(data[<span class="string">'timestamp'</span>])
+        event_type = data[<span class="string">'event_type'</span>] <span class="comment"># 'START' or 'END'</span>
+
+        ct, tt = <span class="keyword">None</span>, <span class="keyword">None</span>
+
+        <span class="comment"># 2. 지표 산출 로직</span>
+        <span class="keyword">if</span> event_type == <span class="string">'END'</span>:
+            <span class="comment"># CT 산출 (현재 END 시간 - 현재 START 시간)</span>
+            start_time = datetime.fromisoformat(data[<span class="string">'start_time'</span>])
+            ct = (event_time - start_time).total_seconds()
+
+            <span class="comment"># TT 산출 (현재 END 시간 - 이전 END 시간)</span>
+            <span class="keyword">if</span> eqp_id <span class="keyword">in</span> self.last_end_time:
+                tt = (event_time - self.last_end_time[eqp_id]).total_seconds()
+            
+            <span class="comment"># 상태 업데이트</span>
+            self.last_end_time[eqp_id] = event_time
+
+        <span class="keyword">return</span> {
+            <span class="string">"eqp_id"</span>: eqp_id,
+            <span class="string">"timestamp"</span>: event_time,
+            <span class="string">"ct"</span>: ct,
+            <span class="string">"tt"</span>: tt
+        }</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>3. 핵심 구현 2: 실시간 Context 매핑 및 SQLite 고속 처리</h2>
+        <p>MOS(생산관리시스템)의 작업 지시 정보를 실시간 설비 데이터와 결합합니다. SQLite의 I/O 병목을 해결하기 위해 <strong>WAL(Write-Ahead Logging)</strong> 모드를 사용합니다.</p>
+        
+        <h3>💡 SQLite 테이블 스키마 설계 (예시)</h3>
+<pre><code><span class="keyword">CREATE TABLE</span> FACT_PRODUCTION (
+    SEQ <span class="keyword">INTEGER PRIMARY KEY AUTOINCREMENT</span>,
+    EQP_ID <span class="keyword">TEXT NOT NULL</span>,
+    LOT_ID <span class="keyword">TEXT NOT NULL</span>,         <span class="comment">-- MOS Context 매핑</span>
+    MODEL_CODE <span class="keyword">TEXT</span>,              <span class="comment">-- MOS Context 매핑</span>
+    EVENT_TIME <span class="keyword">DATETIME NOT NULL</span>,
+    CYCLE_TIME <span class="keyword">REAL</span>,
+    TACT_TIME <span class="keyword">REAL</span>,
+    PROD_QTY <span class="keyword">INTEGER</span>              <span class="comment">-- 실적 수량</span>
+);</code></pre>
+
+        <h3>💡 Python 기반 SQLite 고속 저장 및 Context 매핑 로직</h3>
+<pre><code><span class="keyword">import</span> sqlite3
+
+<span class="keyword">class</span> <span class="function">ContextManagerDB</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, db_path=<span class="string">"edge_local.db"</span>):
+        self.conn = sqlite3.connect(db_path, isolation_level=<span class="keyword">None</span>)
+        <span class="comment"># SQLite 성능 최적화: WAL 모드 활성화로 동시성 확보</span>
+        self.conn.execute(<span class="string">"PRAGMA journal_mode=WAL;"</span>)
+        self.conn.execute(<span class="string">"PRAGMA synchronous=NORMAL;"</span>)
+        
+        <span class="comment"># 최신 MOS 상태값을 메모리에 캐싱</span>
+        self.mos_context_cache = {}
+
+    <span class="keyword">def</span> <span class="function">update_mos_context</span>(self, eqp_id, lot_id, model_code):
+        <span class="comment">"""MOS 연동 데몬이 주기적으로 호출하여 최신 Context 업데이트"""</span>
+        self.mos_context_cache[eqp_id] = {
+            <span class="string">"lot_id"</span>: lot_id,
+            <span class="string">"model_code"</span>: model_code
+        }
+
+    <span class="keyword">def</span> <span class="function">insert_production_record</span>(self, metrics_data):
+        <span class="comment">"""산출된 지표와 Context를 결합하여 DB 저장"""</span>
+        eqp_id = metrics_data[<span class="string">'eqp_id'</span>]
+        context = self.mos_context_cache.get(eqp_id, {<span class="string">"lot_id"</span>: <span class="string">"UNKNOWN"</span>, <span class="string">"model_code"</span>: <span class="string">"UNKNOWN"</span>})
+
+        query = <span class="string">"""
+            INSERT INTO FACT_PRODUCTION (EQP_ID, LOT_ID, MODEL_CODE, EVENT_TIME, CYCLE_TIME, TACT_TIME)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """</span>
+        self.conn.execute(query, (
+            eqp_id, 
+            context[<span class="string">'lot_id'</span>], 
+            context[<span class="string">'model_code'</span>], 
+            metrics_data[<span class="string">'timestamp'</span>], 
+            metrics_data[<span class="string">'ct'</span>], 
+            metrics_data[<span class="string">'tt'</span>]
+        ))</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>4. Edge 모듈 개발 시 체크포인트</h2>
+        <ul>
+            <li><strong>메모리 누수(Memory Leak) 방지:</strong> <code>last_end_time</code>이나 캐시 딕셔너리가 무한정 커지지 않도록 주기적으로 사용하지 않는 설비 ID를 정리하는 Garbage Collection 로직 필요.</li>
+            <li><strong>예외 처리(Exception Handling):</strong> 타임스탬프 역전이나 비정상적인 CT/TT 값(음수 또는 기준치 10배 이상)은 Drop 하거나 별도 Error Log로 분리하는 필터링 로직 추가.</li>
+        </ul>
+    </div>
+
+</body>
+</html>

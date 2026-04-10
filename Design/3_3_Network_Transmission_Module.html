@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>네트워크 전송 및 장애 대응 모듈 설계서 (Edge ↔ HQ)</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 950px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f4f8;
+        }
+        h1 {
+            color: #1a365d;
+            border-bottom: 3px solid #3182ce;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #2b6cb0;
+            margin-top: 30px;
+            border-left: 4px solid #3182ce;
+            padding-left: 10px;
+        }
+        h3 {
+            color: #2c5282;
+        }
+        p {
+            margin-bottom: 15px;
+        }
+        .section-card {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        pre {
+            background-color: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 1.4;
+        }
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        /* Syntax Highlighting */
+        .keyword { color: #cba6f7; }
+        .string { color: #a6e3a1; }
+        .comment { color: #6c7086; font-style: italic; }
+        .function { color: #89b4fa; }
+        .number { color: #fab387; }
+        .builtin { color: #f38ba8; }
+        
+        ul, ol {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 10px;
+        }
+        .highlight {
+            background-color: #ebf8ff;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-weight: bold;
+            color: #3182ce;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>3. 네트워크 전송 및 장애 대응 모듈 개발 (Edge ↔ HQ)</h1>
+    
+    <div class="section-card">
+        <h2>1. 모듈 개요 (Module Overview)</h2>
+        <p>본 모듈은 Edge 환경에서 30분 또는 1시간 주기로 메모리에 누적된 통계 데이터(Mean, Variance, KLL Sketch 등)를 직렬화하여 본사 통합 서버로 전송합니다. 글로벌 네트워크의 간헐적 단절에 대비하여 데이터 유실을 100% 방지하는 것이 최우선 목표입니다.</p>
+        <ul>
+            <li><strong>이중 압축:</strong> KLL 스케치 자체의 수학적 데이터 압축에 더해, JSON 페이로드 전체를 <span class="highlight">Zstandard(Zstd)</span> 알고리즘으로 한 번 더 압축하여 트래픽을 극단적으로 최소화합니다.</li>
+            <li><strong>Store & Forward:</strong> HTTP 전송 실패 시 로컬 큐(Queue)에 데이터를 안전하게 저장하고, 네트워크 복구 시 순차적으로 재전송(Retry)합니다.</li>
+        </ul>
+    </div>
+
+    <div class="section-card">
+        <h2>2. 핵심 구현 1: 페이로드 생성 및 Zstd 고속 압축</h2>
+        <p>통계 상태값과 이진 데이터인 KLL 스케치를 안전하게 JSON으로 묶기 위해 Base64 인코딩을 거친 후, Zstd로 최종 압축하는 로직입니다.</p>
+<pre><code><span class="keyword">import</span> json
+<span class="keyword">import</span> base64
+<span class="keyword">import</span> zstandard <span class="keyword">as</span> zstd
+
+<span class="keyword">class</span> <span class="function">PayloadBuilder</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, corporation_code):
+        self.corp_code = corporation_code
+
+    <span class="keyword">def</span> <span class="function">build_and_compress</span>(self, eqp_id, start_time, end_time, welford_stats, kll_sketch_bytes):
+        <span class="comment">"""통계 데이터를 JSON으로 구성하고 Zstd로 압축"""</span>
+        
+        <span class="comment"># 1. KLL 스케치 바이트 배열을 JSON에 담기 위해 Base64로 인코딩</span>
+        encoded_sketch = base64.b64encode(kll_sketch_bytes).decode(<span class="string">'utf-8'</span>)
+        
+        <span class="comment"># 2. 페이로드 구성</span>
+        payload = {
+            <span class="string">"corp_code"</span>: self.corp_code,
+            <span class="string">"eqp_id"</span>: eqp_id,
+            <span class="string">"period_start"</span>: start_time.isoformat(),
+            <span class="string">"period_end"</span>: end_time.isoformat(),
+            <span class="string">"stats"</span>: {
+                <span class="string">"count"</span>: welford_stats[<span class="string">'count'</span>],
+                <span class="string">"mean"</span>: welford_stats[<span class="string">'mean'</span>],
+                <span class="string">"variance"</span>: welford_stats[<span class="string">'variance'</span>]
+            },
+            <span class="string">"kll_sketch_base64"</span>: encoded_sketch
+        }
+        
+        json_str = json.dumps(payload)
+        
+        <span class="comment"># 3. Zstd 압축 (레벨 3 - 속도와 압축률의 최적 밸런스)</span>
+        compressor = zstd.ZstdCompressor(level=<span class="number">3</span>)
+        compressed_payload = compressor.compress(json_str.encode(<span class="string">'utf-8'</span>))
+        
+        <span class="keyword">return</span> compressed_payload</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>3. 핵심 구현 2: Store & Forward 및 재전송 로직</h2>
+        <p>네트워크 단절 시 데이터를 로컬 DB(SQLite) 큐에 저장하고, 데몬(Daemon) 쓰레드가 주기적으로 재전송을 시도하는 안정성 보장 로직입니다.</p>
+<pre><code><span class="keyword">import</span> requests
+<span class="keyword">import</span> sqlite3
+<span class="keyword">import</span> time
+
+<span class="keyword">class</span> <span class="function">NetworkTransmitter</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, hq_endpoint, db_path=<span class="string">"edge_queue.db"</span>):
+        self.hq_endpoint = hq_endpoint
+        self.conn = sqlite3.connect(db_path, isolation_level=<span class="keyword">None</span>)
+        self._init_queue_table()
+
+    <span class="keyword">def</span> <span class="function">_init_queue_table</span>(self):
+        <span class="comment"># 전송 대기열 테이블 생성</span>
+        query = <span class="string">"""
+            CREATE TABLE IF NOT EXISTS TRANSMIT_QUEUE (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                PAYLOAD BLOB NOT NULL,
+                CREATED_AT DATETIME DEFAULT CURRENT_TIMESTAMP,
+                RETRY_COUNT INTEGER DEFAULT 0
+            )
+        """</span>
+        self.conn.execute(query)
+
+    <span class="keyword">def</span> <span class="function">send_data</span>(self, compressed_payload):
+        <span class="comment">"""데이터 전송 시도. 실패 시 큐에 저장"""</span>
+        <span class="keyword">try</span>:
+            headers = {<span class="string">'Content-Type'</span>: <span class="string">'application/zstd'</span>}
+            response = requests.post(self.hq_endpoint, data=compressed_payload, headers=headers, timeout=<span class="number">10</span>)
+            response.raise_for_status()
+            <span class="builtin">print</span>(<span class="string">"전송 성공"</span>)
+        <span class="keyword">except</span> requests.exceptions.RequestException <span class="keyword">as</span> e:
+            <span class="builtin">print</span>(<span class="string">f"네트워크 오류, 큐에 저장: {e}"</span>)
+            self._save_to_queue(compressed_payload)
+
+    <span class="keyword">def</span> <span class="function">_save_to_queue</span>(self, payload):
+        self.conn.execute(<span class="string">"INSERT INTO TRANSMIT_QUEUE (PAYLOAD) VALUES (?)"</span>, (payload,))
+
+    <span class="keyword">def</span> <span class="function">process_queue</span>(self):
+        <span class="comment">"""백그라운드에서 주기적으로 실행되는 재전송 스케줄러"""</span>
+        cursor = self.conn.execute(<span class="string">"SELECT ID, PAYLOAD FROM TRANSMIT_QUEUE ORDER BY ID ASC LIMIT 50"</span>)
+        rows = cursor.fetchall()
+        
+        <span class="keyword">for</span> row_id, payload <span class="keyword">in</span> rows:
+            <span class="keyword">try</span>:
+                headers = {<span class="string">'Content-Type'</span>: <span class="string">'application/zstd'</span>}
+                response = requests.post(self.hq_endpoint, data=payload, headers=headers, timeout=<span class="number">10</span>)
+                <span class="keyword">if</span> response.status_code == <span class="number">200</span>:
+                    <span class="comment"># 전송 성공 시 큐에서 삭제</span>
+                    self.conn.execute(<span class="string">"DELETE FROM TRANSMIT_QUEUE WHERE ID = ?"</span>, (row_id,))
+            <span class="keyword">except</span> requests.exceptions.RequestException:
+                <span class="comment"># 실패 시 재시도 횟수 증가 (알람 처리용)</span>
+                self.conn.execute(<span class="string">"UPDATE TRANSMIT_QUEUE SET RETRY_COUNT = RETRY_COUNT + 1 WHERE ID = ?"</span>, (row_id,))
+                <span class="keyword">break</span> <span class="comment"># 통신 장애가 지속 중이므로 루프 중단 후 다음 주기에 시도</span></code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>4. 모듈 개발 시 체크포인트</h2>
+        <ul>
+            <li><strong>보안 (Security):</strong> 글로벌 전송 시 데이터 탈취 방지를 위해 반드시 <code>HTTPS (TLS 1.2 이상)</code> 프로토콜을 사용해야 하며, API Key 또는 JWT 토큰을 통한 Edge 인증 로직이 추가되어야 합니다.</li>
+            <li><strong>큐 모니터링 (Queue Monitoring):</strong> 장기간 통신 단절 시 SQLite DB 파일 용량이 비정상적으로 커질 수 있으므로, <code>TRANSMIT_QUEUE</code>의 데이터 건수가 임계치(예: 10,000건)를 초과하면 로컬 알람을 띄우고 오래된 데이터를 Drop할지(혹은 유지할지) 정책적 결정이 필요합니다.</li>
+            <li><strong>HQ 수신부 대응:</strong> 본사(HQ) API 서버는 <code>Content-Type: application/zstd</code> 헤더를 인식하고, 역순으로 압축 해제(Zstd Decompression) -> JSON 파싱 -> Base64 디코딩을 수행하는 전용 엔드포인트를 구현해야 합니다.</li>
+        </ul>
+    </div>
+
+</body>
+</html>

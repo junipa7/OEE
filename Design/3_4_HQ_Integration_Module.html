@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>본사(HQ) 통합 서버 모듈 설계서</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 950px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f9;
+        }
+        h1 {
+            color: #4a148c;
+            border-bottom: 3px solid #7b1fa2;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #6a1b9a;
+            margin-top: 30px;
+            border-left: 4px solid #7b1fa2;
+            padding-left: 10px;
+        }
+        h3 {
+            color: #4a148c;
+        }
+        p {
+            margin-bottom: 15px;
+        }
+        .section-card {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        pre {
+            background-color: #282a36;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            line-height: 1.4;
+        }
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        /* Syntax Highlighting for Java */
+        .keyword { color: #ff79c6; }
+        .type { color: #8be9fd; font-style: italic; }
+        .string { color: #f1fa8c; }
+        .comment { color: #6272a4; }
+        .function { color: #50fa7b; }
+        .number { color: #bd93f9; }
+        .annotation { color: #ffb86c; }
+        
+        ul, ol {
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 10px;
+        }
+        .highlight {
+            background-color: #f3e5f5;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-weight: bold;
+            color: #6a1b9a;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>4. 본사(HQ) 통합 서버 모듈 개발 (Spring Boot)</h1>
+    
+    <div class="section-card">
+        <h2>1. 모듈 개요 (Module Overview)</h2>
+        <p>본사 통합 서버는 7개 글로벌 생산법인에서 Zstd로 압축하여 전송한 통계 페이로드를 수신하고, 분산된 통계 데이터를 로우 데이터(Raw Data) 없이 수학적으로 정확하게 병합하는 역할을 수행합니다.</p>
+        <ul>
+            <li><strong>압축 해제 및 복원:</strong> Zstd 페이로드를 압축 해제하고, Base64로 인코딩된 KLL 스케치 객체를 Java 환경에서 복원합니다.</li>
+            <li><strong>통계 병합 (Chan's Algorithm):</strong> 각 법인의 평균(Mean)과 분산(Variance)을 병합하여 글로벌 통합 표준 시간(Standard Time, ST)을 산출합니다.</li>
+            <li><strong>기준정보 배포 (Master Data Sync):</strong> 본사에서 관리하는 설비 표준 코드 및 목표 ST를 각 법인으로 일괄 배포하는 파이프라인을 운영합니다.</li>
+        </ul>
+    </div>
+
+    <div class="section-card">
+        <h2>2. 핵심 구현 1: Zstd 페이로드 수신 및 압축 해제</h2>
+        <p>Spring Boot의 REST Controller에서 <code>application/zstd</code> 형태의 바이너리 스트림을 받아 해제하는 로직입니다. <code>zstd-jni</code> 라이브러리를 활용합니다.</p>
+<pre><code><span class="keyword">import</span> com.github.luben.zstd.ZstdInputStream;
+<span class="keyword">import</span> com.fasterxml.jackson.databind.ObjectMapper;
+<span class="keyword">import</span> org.springframework.web.bind.annotation.*;
+
+<span class="annotation">@RestController</span>
+<span class="annotation">@RequestMapping</span>(<span class="string">"/api/v1/telemetry"</span>)
+<span class="keyword">public class</span> <span class="type">EdgeDataReceiverController</span> {
+
+    <span class="keyword">private final</span> <span class="type">ObjectMapper</span> objectMapper = <span class="keyword">new</span> <span class="type">ObjectMapper</span>();
+
+    <span class="annotation">@PostMapping</span>(value = <span class="string">"/upload"</span>, consumes = <span class="string">"application/zstd"</span>)
+    <span class="keyword">public</span> <span class="type">ResponseEntity&lt;String&gt;</span> <span class="function">receiveData</span>(<span class="type">InputStream</span> requestStream) {
+        <span class="keyword">try</span> (<span class="type">ZstdInputStream</span> zstdStream = <span class="keyword">new</span> <span class="type">ZstdInputStream</span>(requestStream)) {
+            <span class="comment">// 1. Zstd 압축 해제 및 JSON 파싱</span>
+            <span class="type">EdgePayloadDTO</span> payload = objectMapper.readValue(zstdStream, <span class="type">EdgePayloadDTO</span>.class);
+            
+            <span class="comment">// 2. Service 레이어로 전달하여 병합 로직 수행</span>
+            statisticsService.processPayload(payload);
+            
+            <span class="keyword">return</span> ResponseEntity.ok(<span class="string">"SUCCESS"</span>);
+        } <span class="keyword">catch</span> (<span class="type">Exception</span> e) {
+            <span class="keyword">return</span> ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(<span class="string">"FAIL"</span>);
+        }
+    }
+}</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>3. 핵심 구현 2: 분산 통계 병합 알고리즘 (Chan's Update Formula)</h2>
+        <p>두 개 이상의 법인(또는 시간대)에서 집계된 (Count, Mean, Variance) 데이터 셋을 원본 데이터 없이 정확하게 하나로 합치는 로직입니다. 분산 병합을 위해 <strong>Chan의 병합 알고리즘</strong>을 적용합니다.</p>
+<pre><code><span class="keyword">public class</span> <span class="type">StatisticalMerger</span> {
+
+    <span class="keyword">public static</span> <span class="type">MergedStat</span> <span class="function">merge</span>(<span class="type">Stat</span> stat1, <span class="type">Stat</span> stat2) {
+        <span class="type">long</span> n1 = stat1.getCount();
+        <span class="type">long</span> n2 = stat2.getCount();
+        <span class="type">long</span> n = n1 + n2;
+
+        <span class="keyword">if</span> (n == <span class="number">0</span>) <span class="keyword">return new</span> <span class="type">MergedStat</span>(<span class="number">0</span>, <span class="number">0.0</span>, <span class="number">0.0</span>);
+
+        <span class="comment">// 평균 병합 (Combined Mean)</span>
+        <span class="type">double</span> delta = stat2.getMean() - stat1.getMean();
+        <span class="type">double</span> combinedMean = stat1.getMean() + (delta * n2 / n);
+
+        <span class="comment">// M2 (Sum of squares of differences) 복원 및 병합</span>
+        <span class="comment">// Variance = M2 / (n - 1) 이므로 역산하여 M2를 구함</span>
+        <span class="type">double</span> m2_1 = stat1.getVariance() * (n1 - <span class="number">1</span>);
+        <span class="type">double</span> m2_2 = stat2.getVariance() * (n2 - <span class="number">1</span>);
+        
+        <span class="comment">// Chan's Algorithm을 활용한 M2 병합</span>
+        <span class="type">double</span> combinedM2 = m2_1 + m2_2 + (delta * delta * n1 * n2 / n);
+        
+        <span class="comment">// 통합 분산(Combined Variance) 계산</span>
+        <span class="type">double</span> combinedVariance = combinedM2 / (n - <span class="number">1</span>);
+
+        <span class="keyword">return new</span> <span class="type">MergedStat</span>(n, combinedMean, combinedVariance);
+    }
+}</code></pre>
+        <p class="comment">※ KLL 스케치 병합의 경우 Apache DataSketches Java 라이브러리의 <code>KllFloatsSketch.merge(otherSketch)</code> 메서드를 호출하여 간단히 글로벌 P50(중앙값) 및 P99 분포를 산출할 수 있습니다.</p>
+    </div>
+
+    <div class="section-card">
+        <h2>4. 핵심 구현 3: 기준정보 (Master Data) 배포 파이프라인</h2>
+        <p>본사에서 확립된 표준 CT(Cycle Time)와 기종 정보를 7개 법인으로 동기화하기 위한 엔드포인트입니다. Edge 노드가 주기적으로 이 API를 호출하여 SQLite 캐시를 업데이트합니다.</p>
+<pre><code><span class="annotation">@RestController</span>
+<span class="annotation">@RequestMapping</span>(<span class="string">"/api/v1/master-data"</span>)
+<span class="keyword">public class</span> <span class="type">MasterDataSyncController</span> {
+
+    <span class="annotation">@GetMapping</span>(<span class="string">"/sync/{corpCode}"</span>)
+    <span class="keyword">public</span> <span class="type">ResponseEntity&lt;MasterDataResponse&gt;</span> <span class="function">getUpdatedMasterData</span>(
+            <span class="annotation">@PathVariable</span> <span class="type">String</span> corpCode,
+            <span class="annotation">@RequestParam</span> <span class="type">String</span> lastSyncTimestamp) {
+        
+        <span class="comment">// 본사 Oracle DB에서 lastSyncTimestamp 이후 변경된 기준정보만 추출 (Delta Sync)</span>
+        <span class="type">List&lt;StandardTimeDTO&gt;</span> updatedST = masterDataService.getUpdatedST(corpCode, lastSyncTimestamp);
+        
+        <span class="type">MasterDataResponse</span> response = <span class="keyword">new</span> <span class="type">MasterDataResponse</span>(updatedST);
+        <span class="keyword">return</span> ResponseEntity.ok(response);
+    }
+}</code></pre>
+    </div>
+
+    <div class="section-card">
+        <h2>5. 본사 통합 서버 개발 시 체크포인트</h2>
+        <ul>
+            <li><strong>글로벌 Timezone 일원화:</strong> 7개 국가의 법인에서 올라오는 데이터의 타임스탬프는 모두 <code>UTC (Coordinated Universal Time)</code>로 통일하여 Oracle DB에 적재해야 시계열 통계 분석 시 오류가 발생하지 않습니다.</li>
+            <li><strong>Oracle DB 파티셔닝 (Partitioning):</strong> 설비별/법인별 요약 데이터라도 장기적으로 쌓이면 테이블이 거대해집니다. <code>EVENT_DATE</code>를 기준으로 월 단위 범위 파티셔닝(Range Partitioning)을 적용하여 조회 성능을 확보해야 합니다.</li>
+            <li><strong>무결성 보장:</strong> Edge에서 보낸 JSON 페이로드의 해시값(SHA-256 등)을 헤더에 포함시켜, 네트워크 전송 중 데이터가 위변조되거나 깨지지 않았는지 검증하는 체크섬(Checksum) 로직 추가를 권장합니다.</li>
+        </ul>
+    </div>
+
+</body>
+</html>
