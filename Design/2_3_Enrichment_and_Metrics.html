@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>데이터 보완 및 지표 산출 상세 설계</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9fa;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            border-bottom: 2px solid #2c3e50;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 40px;
+            border-bottom: 1px solid #bdc3c7;
+            padding-bottom: 5px;
+        }
+        h3 {
+            color: #34495e;
+            background-color: #ecf0f1;
+            padding: 8px 12px;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+        }
+        ul, ol {
+            margin-bottom: 20px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+        .highlight {
+            font-weight: bold;
+            color: #e74c3c;
+        }
+        .box {
+            background-color: #fff;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #34495e;
+            color: white;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        .flow-step {
+            display: inline-block;
+            background-color: #3498db;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            margin: 5px;
+            font-weight: bold;
+        }
+        .flow-arrow {
+            display: inline-block;
+            color: #3498db;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>설비 생산성 관리 시스템<br>데이터 보완 및 지표 산출 (Enrichment & Metrics) 상세 설계서</h1>
+
+    <div class="box">
+        <p>본 모듈은 설비에서 발생하는 단순한 원천(Raw) 메시지에 생산 관리 시스템(MOS/MES)의 비즈니스 컨텍스트(Lot, 제품코드 등)를 결합하고, 핵심 성능 지표인 CT(Cycle Time)와 TT(Tact Time)를 오차 없이 산출하는 역할을 수행합니다.</p>
+    </div>
+
+    <h2>🔄 1. 상태 정보 보완 (Context Enrichment) 흐름 설계</h2>
+    <p>단편적인 설비의 센서/제어기 데이터에 '어떤 제품을, 어떤 레시피로 만들고 있는지'에 대한 의미를 부여하는 과정입니다.</p>
+
+    <h3>A. 컨텍스트(Context) 갱신 트리거</h3>
+    <ul>
+        <li><strong>MOS/MES 이벤트 수신 시 (작업 지시, Track-In 등):</strong> <code>CURR_LOT_ID</code>, <code>PROD_ID</code>(기종 코드), <code>PROC_CD</code>, <code>RECIPE_ID</code>, <code>TARGET_QTY</code> 값을 즉시 업데이트합니다.</li>
+        <li><strong>설비 상태 알람 수신 시:</strong> <code>EQP_STATUS</code> (RUN, DOWN, IDLE) 값을 갱신합니다.</li>
+    </ul>
+
+    <h3>B. 데이터 병합(Join) 프로세스</h3>
+    <ol>
+        <li><strong>Raw 메시지 수신:</strong> 설비에서 메시지(예: 온도, 압력 등)가 들어오면 <code>TB_RAW_MSG</code>에 우선 적재합니다.</li>
+        <li><strong>실시간 병합:</strong> 메시지가 들어온 즉시 백그라운드 워커(Worker) 프로세스가 해당 장비(<code>EQP_ID</code>)의 <code>TB_CURRENT_CONTEXT</code> 최신 레코드를 조회하여 Raw 데이터에 덧붙입니다.</li>
+        <li><strong>최종 적재:</strong> 컨텍스트가 결합된 완전한 형태의 데이터가 <code>TB_ENRICHED_LOG</code>에 저장됩니다.</li>
+    </ol>
+
+    <h3>C. Race Condition (타이밍 불일치) 방어 로직</h3>
+    <div class="box">
+        <ul>
+            <li><strong>문제 상황:</strong> 설비는 가동 시작 메시지를 보냈는데, 네트워크 지연으로 MOS의 Lot 정보가 아직 업데이트되지 않은 경우.</li>
+            <li><strong>해결 로직 (Wait & Retry):</strong> Raw 메시지 수신 시 <code>CURRENT_CONTEXT</code>의 Lot 정보가 비어있거나 최종 갱신 시간이 너무 오래되었다면, 해당 메시지를 메모리 큐에서 <span class="highlight">최대 3초간 대기(Wait)</span>시킵니다. 3초 내에 MOS 이벤트가 도착하여 컨텍스트가 갱신되면 그때 병합을 수행합니다.</li>
+        </ul>
+    </div>
+
+
+    <h2>⏱️ 2. 핵심 지표 (CT / TT) 산출 알고리즘</h2>
+    <p>설비의 실질적인 생산 속도를 측정하기 위해 Process Start와 Process End 이벤트를 기반으로 시간을 계산합니다.</p>
+    <ul>
+        <li><strong>CT (Cycle Time / 순수 가공 시간):</strong> 단일 제품/Wafer가 설비 내에서 실제로 가공된 시간.
+            <br>➔ <code>계산식:</code> <strong>현재 Process End Time - 매핑된 Process Start Time</strong>
+        </li>
+        <li><strong>TT (Tact Time / 산출 간격 시간):</strong> 설비에서 제품이 배출되는 실제 간격 (물류 및 대기 시간 포함).
+            <br>➔ <code>계산식:</code> <strong>현재 Process End Time - 직전(Previous) Process End Time</strong>
+        </li>
+    </ul>
+
+
+    <h2>🛡️ 3. 3중 데이터 매핑 및 예외 처리 (방어 로직)</h2>
+    <p>배치(Batch) 설비나 다중 챔버 설비의 경우, 여러 개의 Start 이벤트가 중첩되므로 End 이벤트와 정확히 짝을 맞추는 매핑(Mapping)과 추정(Estimation) 로직이 필수적입니다.</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>순위</th>
+                <th>매핑 방식</th>
+                <th>적용 조건</th>
+                <th>상세 처리 로직</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>1순위</strong></td>
+                <td>고유 Key 기반 명시적 매핑<br>(Explicit Match)</td>
+                <td>이벤트 페이로드에 식별자(<code>MATERIAL_ID</code> 등)가 포함된 경우</td>
+                <td>
+                    - Start 수신: <code>TB_WIP_TRACKING</code>에 [MATERIAL_ID, START_TIME] 저장<br>
+                    - End 수신: 동일한 MATERIAL_ID를 찾아 CT를 계산하고 해당 레코드를 삭제(Pop)
+                </td>
+            </tr>
+            <tr>
+                <td><strong>2순위</strong></td>
+                <td>FIFO 매핑<br>(First-In-First-Out)</td>
+                <td>Key는 없으나, 투입된 순서대로 배출되는 물리적 구조일 경우</td>
+                <td>
+                    - Start 수신: <code>TB_WIP_TRACKING</code>에 순서대로 누적<br>
+                    - End 수신: 대기열에서 가장 먼저 들어온(가장 오래된) START_TIME을 꺼내어 매핑
+                </td>
+            </tr>
+            <tr>
+                <td><strong>3순위</strong></td>
+                <td>기준 시간 기반 역산 추정<br>(Fallback Estimation)</td>
+                <td>네트워크 유실 등으로 인해 Start 이벤트 자체가 수신되지 않은 경우</td>
+                <td>
+                    - 산출식: <code>현재 Process End Time</code> - <strong>본사 표준 CT (또는 최근 평균 CT)</strong><br>
+                    - 플래그 부여: <code>TB_ENRICHED_LOG</code>의 <code>ESTIMATED_FLAG</code> 컬럼에 <strong>'Y'</strong> 값을 부여하여 통계 분석 시 신뢰도 구분
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>🗑️ 가비지 컬렉션 (Garbage Collection / Memory Leak 방지)</h3>
+    <div class="box">
+        <p><strong>상황:</strong> Start 이벤트만 수신되고 설비 에러나 수작업 배출로 인해 End 이벤트가 영원히 오지 않는 경우.</p>
+        <p><strong>처리:</strong> <code>TB_WIP_TRACKING</code>을 주기적으로 스캔하여 대기 시간이 <span class="highlight">표준 CT의 3배</span>를 초과한 항목은 가공 실패(Loss/Drop)로 간주하고 메모리에서 강제 삭제(Flush)한 뒤 에러 로그를 남깁니다.</p>
+    </div>
+
+
+    <h2>📊 4. 전체 데이터 흐름 요약 (Data Flow)</h2>
+    <div style="text-align: center; margin: 30px 0;">
+        <div class="flow-step">1. 설비 이벤트 발생<br><small>(Process Start/End)</small></div>
+        <div class="flow-arrow">➔</div>
+        <div class="flow-step">2. 원천 데이터 적재<br><small>(TB_RAW_MSG)</small></div>
+        <div class="flow-arrow">➔</div>
+        <div class="flow-step">3. 컨텍스트 병합<br><small>(TB_CURRENT_CONTEXT)</small></div>
+        <div class="flow-arrow">➔</div>
+        <div class="flow-step">4. 지표 산출기 가동<br><small>(Key 매칭 / CT, TT 산출)</small></div>
+        <div class="flow-arrow">➔</div>
+        <div class="flow-step">5. 최종 로그 적재<br><small>(TB_ENRICHED_LOG)</small></div>
+    </div>
+    <p style="text-align: center; color: #7f8c8d; font-size: 0.9em;">(이후 백그라운드에서 KLL/Chan 알고리즘에 의해 30분 단위 통계 압축 진행 후 본사 전송)</p>
+
+</body>
+</html>

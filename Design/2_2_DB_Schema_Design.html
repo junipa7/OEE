@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>설비 생산성 관리 시스템 DB 스키마 상세 설계 (V2)</title>
+    <style>
+        body {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9fa;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            border-bottom: 2px solid #2c3e50;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 40px;
+            border-bottom: 1px solid #bdc3c7;
+            padding-bottom: 5px;
+        }
+        h3 {
+            color: #34495e;
+            background-color: #ecf0f1;
+            padding: 8px 12px;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #34495e;
+            color: white;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        tr:hover {
+            background-color: #f1f2f6;
+        }
+        .pk {
+            color: #e74c3c;
+            font-weight: bold;
+            text-align: center;
+        }
+        .new-col {
+            background-color: #e8f8f5;
+            color: #16a085;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>설비 생산성 관리 시스템 DB 스키마 상세 설계서 (업데이트 반영)</h1>
+
+    <h2>🗄️ 1. 생산법인 (Edge / SQLite) 스키마 상세</h2>
+    <p>현장의 고성능 서버(Linux)에 상주하며, 설비 메시지 수신, 상태 보완, CT/TT 실시간 산출 및 압축 큐잉을 담당하는 스키마입니다.</p>
+
+    <h3>1.1. TB_CURRENT_CONTEXT (설비 실시간 상태 보완 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+                <th>갱신 트리거 (Trigger)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>EQP_ID</td>
+                <td>VARCHAR</td>
+                <td class="pk">Y</td>
+                <td>기준 장비(설비) 식별자</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>CURR_LOT_ID</td>
+                <td>VARCHAR</td>
+                <td></td>
+                <td>현재 작업 중인 Lot ID</td>
+                <td>MOS Track-In/Lot 변경 이벤트 수신 시</td>
+            </tr>
+            <tr>
+                <td class="new-col">PROD_ID</td>
+                <td>VARCHAR</td>
+                <td></td>
+                <td>현재 생산 기종 코드 (기존 MODEL_CD)</td>
+                <td>MOS Track-In/Lot 변경 이벤트 수신 시</td>
+            </tr>
+            <tr>
+                <td>PROC_CD</td>
+                <td>VARCHAR</td>
+                <td></td>
+                <td>현재 생산 공정 코드</td>
+                <td>MOS Track-In/Lot 변경 이벤트 수신 시</td>
+            </tr>
+            <tr>
+                <td>RECIPE_ID</td>
+                <td>VARCHAR</td>
+                <td></td>
+                <td>현재 적용된 설비 레시피 ID</td>
+                <td>장비 Recipe Change 이벤트 수신 시</td>
+            </tr>
+            <tr>
+                <td>TARGET_QTY</td>
+                <td>INTEGER</td>
+                <td></td>
+                <td>현재 Lot의 총 투입 목표 수량</td>
+                <td>MOS Track-In 이벤트 수신 시</td>
+            </tr>
+            <tr>
+                <td>DONE_QTY</td>
+                <td>INTEGER</td>
+                <td></td>
+                <td>현재까지의 완성 수량</td>
+                <td>장비 Process End 이벤트 수신 시 (+1)</td>
+            </tr>
+            <tr>
+                <td>EQP_STATUS</td>
+                <td>VARCHAR</td>
+                <td></td>
+                <td>설비 가동 상태 (RUN, IDLE, DOWN)</td>
+                <td>장비 Status Change 알람 수신 시</td>
+            </tr>
+            <tr>
+                <td>LAST_PRC_START_TIME</td>
+                <td>DATETIME</td>
+                <td></td>
+                <td>가장 최근 Process Start 이벤트 발생 시간</td>
+                <td>장비 Process Start 수신 시. (CT 산출 기준점)</td>
+            </tr>
+            <tr>
+                <td>LAST_PRC_END_TIME</td>
+                <td>DATETIME</td>
+                <td></td>
+                <td>가장 최근 Process End 이벤트 발생 시간</td>
+                <td>장비 Process End 수신 시. (TT 산출 기준점)</td>
+            </tr>
+            <tr>
+                <td>LAST_UPDATED</td>
+                <td>DATETIME</td>
+                <td></td>
+                <td>레코드 최종 갱신 일시</td>
+                <td>위 컬럼들 중 하나라도 변경될 때마다 갱신</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>1.2. TB_WIP_TRACKING (재공 트래킹 임시 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>MATERIAL_ID</td><td>VARCHAR</td><td class="pk">Y</td><td>개별 제품, 웨이퍼, 글라스 고유 식별 Key</td></tr>
+            <tr><td>EQP_ID</td><td>VARCHAR</td><td class="pk">Y</td><td>장비 식별자</td></tr>
+            <tr><td>START_TIME</td><td>DATETIME</td><td></td><td>Process Start 발생 시간</td></tr>
+            <tr><td>INSERTED_AT</td><td>DATETIME</td><td></td><td>레코드 생성 시간</td></tr>
+        </tbody>
+    </table>
+
+    <h3>1.3. TB_ENRICHED_LOG (상태 보완 및 지표 산출 완료 로그 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>LOG_ID</td><td>VARCHAR</td><td class="pk">Y</td><td>보완된 로그의 고유 식별자</td></tr>
+            <tr><td>EQP_ID</td><td>VARCHAR</td><td></td><td>발생 설비 식별자</td></tr>
+            <tr><td>EVT_TYPE</td><td>VARCHAR</td><td></td><td>이벤트 유형</td></tr>
+            <tr><td>CURR_LOT_ID</td><td>VARCHAR</td><td></td><td>이벤트 발생 당시의 Lot 정보</td></tr>
+            <tr><td class="new-col">PROD_ID</td><td>VARCHAR</td><td></td><td>이벤트 발생 당시의 기종 코드</td></tr>
+            <tr><td>RECIPE_ID</td><td>VARCHAR</td><td></td><td>이벤트 발생 당시의 레시피 정보</td></tr>
+            <tr><td>CT_VAL</td><td>FLOAT</td><td></td><td>산출된 Cycle Time (초)</td></tr>
+            <tr><td>TT_VAL</td><td>FLOAT</td><td></td><td>산출된 Tact Time (초)</td></tr>
+            <tr><td>ESTIMATED_FLAG</td><td>CHAR(1)</td><td></td><td>CT 추정 여부 (Y/N)</td></tr>
+            <tr><td>EVT_TIME</td><td>DATETIME</td><td></td><td>이벤트 최종 완성 타임스탬프</td></tr>
+        </tbody>
+    </table>
+
+    <h3>1.4. TB_SEND_QUEUE (본사 전송용 30분 단위 대기열 테이블)</h3>
+    <table>
+        <thead>
+            <tr><th>컬럼명 (Physical)</th><th>데이터 타입</th><th>PK</th><th>설명 (Logical & Role)</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>SEQ_NO</td><td>INTEGER</td><td class="pk">Y</td><td>전송 큐 시퀀스</td></tr>
+            <tr><td>PAYLOAD_TYPE</td><td>VARCHAR</td><td></td><td>전송 데이터 유형</td></tr>
+            <tr><td>TARGET_URL</td><td>VARCHAR</td><td></td><td>본사 REST API 수신 엔드포인트</td></tr>
+            <tr><td>JSON_PAYLOAD</td><td>BLOB</td><td></td><td>KLL 스케치 및 Chan 통계 페이로드</td></tr>
+            <tr><td>IS_SENT</td><td>CHAR(1)</td><td></td><td>본사 수신 확인 플래그</td></tr>
+            <tr><td>CREATED_AT</td><td>DATETIME</td><td></td><td>패키징 생성 일시</td></tr>
+        </tbody>
+    </table>
+
+
+    <h2>🏛️ 2. 본사 (HQ / Oracle) 스키마 상세</h2>
+    <p>요청에 따라 <strong>사업부코드(HEADQUARTERCODE)</strong> 및 <strong>제품코드(GODS_CODE)</strong>를 추가하였으며, 명칭을 새롭게 반영했습니다.</p>
+
+    <h3>2.1. TB_HQ_EQP_MASTER (글로벌 설비 마스터 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="new-col">HEADQUARTERCODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>사업부코드 (신규 추가)</td>
+            </tr>
+            <tr>
+                <td class="new-col">SITE_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>법인코드 (기존 CORP_ID)</td>
+            </tr>
+            <tr>
+                <td>EQP_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>글로벌 장비 식별자</td>
+            </tr>
+            <tr>
+                <td>LINE_CD</td>
+                <td>VARCHAR2</td>
+                <td></td>
+                <td>라인 코드</td>
+            </tr>
+            <tr>
+                <td>EQP_GROUP</td>
+                <td>VARCHAR2</td>
+                <td></td>
+                <td>장비 그룹 (동일 스펙/유형 분석용)</td>
+            </tr>
+            <tr>
+                <td>USE_YN</td>
+                <td>CHAR(1)</td>
+                <td></td>
+                <td>장비 사용 여부 (Y/N)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>2.2. TB_HQ_STD_INFO (표준 시간 및 기준정보 관리 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="new-col">HEADQUARTERCODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>사업부코드 (신규 추가)</td>
+            </tr>
+            <tr>
+                <td class="new-col">SITE_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>법인코드</td>
+            </tr>
+            <tr>
+                <td class="new-col">GODS_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>제품코드 (신규 추가)</td>
+            </tr>
+            <tr>
+                <td class="new-col">PROD_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>기종 코드 (기존 MODEL_CD)</td>
+            </tr>
+            <tr>
+                <td>PROC_CD</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>공정 코드</td>
+            </tr>
+            <tr>
+                <td>RECIPE_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>레시피 ID</td>
+            </tr>
+            <tr>
+                <td>STD_CT</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>글로벌 표준 Cycle Time (Standard Time)</td>
+            </tr>
+            <tr>
+                <td>UPDATED_DT</td>
+                <td>DATE</td>
+                <td></td>
+                <td>기준 시간 최종 변경 일시</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>2.3. TB_AGGR_RSLT (통합 실적 및 OEE 집계 테이블)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="new-col">HEADQUARTERCODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>사업부코드 (신규 추가)</td>
+            </tr>
+            <tr>
+                <td class="new-col">SITE_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>법인코드</td>
+            </tr>
+            <tr>
+                <td>EQP_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>장비 식별자</td>
+            </tr>
+            <tr>
+                <td class="new-col">GODS_CODE</td>
+                <td>VARCHAR2</td>
+                <td></td>
+                <td>제품코드 (해당 실적의 주요 제품군)</td>
+            </tr>
+            <tr>
+                <td class="new-col">PROD_ID</td>
+                <td>VARCHAR2</td>
+                <td></td>
+                <td>기종 코드</td>
+            </tr>
+            <tr>
+                <td>WORK_DATE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>작업 일자 (YYYYMMDD 형식)</td>
+            </tr>
+            <tr>
+                <td>TIME_WINDOW</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>30분 단위 구분 (예: 1200_1230)</td>
+            </tr>
+            <tr>
+                <td>TOTAL_RUN_TIME</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분 내 총 가동 시간 (초)</td>
+            </tr>
+            <tr>
+                <td>TOTAL_STOP_TIME</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분 내 총 비가동(알람/에러) 시간 (초)</td>
+            </tr>
+            <tr>
+                <td>TOTAL_IDLE_TIME</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분 내 총 대기 시간 (초)</td>
+            </tr>
+            <tr>
+                <td>DONE_QTY</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분 내 달성한 생산 완료 수량</td>
+            </tr>
+            <tr>
+                <td>OEE_SCORE</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>계산된 설비종합효율(%)</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h3>2.4. TB_STAT_METRICS (통계 지표 KLL/Chan 원천 저장소)</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>컬럼명 (Physical)</th>
+                <th>데이터 타입</th>
+                <th>PK</th>
+                <th>설명 (Logical & Role)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td class="new-col">HEADQUARTERCODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>사업부코드 (신규 추가)</td>
+            </tr>
+            <tr>
+                <td class="new-col">SITE_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>법인코드</td>
+            </tr>
+            <tr>
+                <td>EQP_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>장비 식별자</td>
+            </tr>
+            <tr>
+                <td class="new-col">GODS_CODE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>제품코드</td>
+            </tr>
+            <tr>
+                <td class="new-col">PROD_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>기종 코드</td>
+            </tr>
+            <tr>
+                <td>RECIPE_ID</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>레시피 식별자</td>
+            </tr>
+            <tr>
+                <td>TIME_WINDOW</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>30분 단위 집계 시간</td>
+            </tr>
+            <tr>
+                <td>METRIC_TYPE</td>
+                <td>VARCHAR2</td>
+                <td class="pk">Y</td>
+                <td>지표 유형 ('CT' 또는 'TT')</td>
+            </tr>
+            <tr>
+                <td>CHAN_COUNT</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분간 집계된 데이터 개수 (n)</td>
+            </tr>
+            <tr>
+                <td>CHAN_MEAN</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분간의 평균 시간 (Mean)</td>
+            </tr>
+            <tr>
+                <td>CHAN_M2</td>
+                <td>NUMBER</td>
+                <td></td>
+                <td>해당 30분간의 오차 제곱합 (M2) - 분산 도출용</td>
+            </tr>
+            <tr>
+                <td>KLL_SKETCH_BLOB</td>
+                <td>BLOB</td>
+                <td></td>
+                <td>직렬화(Serialized)된 바이너리 객체 데이터 (중앙값 및 분포 도출용)</td>
+            </tr>
+            <tr>
+                <td>INSERTED_DT</td>
+                <td>DATE</td>
+                <td></td>
+                <td>본사 데이터베이스 적재 시간</td>
+            </tr>
+        </tbody>
+    </table>
+
+</body>
+</html>
